@@ -4,81 +4,89 @@ import pandas as pd
 
 class DecisionTreeClassifier:
     def __init__(self, threshold_info_gains=0.02):
-        """Initialize the Decision Tree Classifier with a threshold for information gains."""
-        self.tree = None
-        self.threshold_info_gains = threshold_info_gains
+        """
+        Initialize the Decision Tree Classifier with a threshold for information gains.
+
+        Parameters:
+            threshold_info_gains (float): The threshold for considering information gains significant.
+        """
+        self.tree = None  # Initialize the tree as None, will be built by fitting the model
+        self.threshold_info_gains = threshold_info_gains  # Threshold for information gain
 
     def entropy(self, target_col):
         """
-        Calculate the entropy of the target column.
+        Calculate the entropy of a target column.
 
         Parameters:
-            target_col (array-like): Target column with class labels.
+            target_col (Series): A pandas Series representing the target variable.
 
         Returns:
-            float: The entropy value.
+            float: The entropy of the target column.
         """
-        counts = np.bincount(target_col)  # Count frequency of each class in the target column
-        probabilities = counts / np.sum(counts)  # Calculate probabilities for each class
-        entropy = -np.sum(
-            probabilities * np.log2(probabilities + 1e-9))  # Calculate entropy, adding epsilon to avoid log2(0)
+        elements, counts = np.unique(target_col, return_counts=True)  # Get unique elements and their frequency
+        entropy = np.sum([
+            (-counts[i] / np.sum(counts)) * np.log2(counts[i] / np.sum(counts))
+            for i in range(len(elements))
+        ])  # Calculate entropy for each unique element and sum
         return entropy
 
     def info_gain(self, data, attribute, target):
         """
-        Calculate the information gain for a specific attribute relative to the target.
+        Calculate the information gain of an attribute relative to the target.
 
         Parameters:
-            data (DataFrame): The dataset including the target column.
-            attribute (str): The feature for which information gain is calculated.
-            target (str): The target column name.
+            data (DataFrame): The entire dataset.
+            attribute (str): The attribute whose info gain is to be calculated.
+            target (str): The target variable in the dataset.
 
         Returns:
-            float: The information gain.
+            float: The information gain from splitting on the specified attribute.
         """
-        total_entropy = self.entropy(data[target])  # Calculate total entropy of the target column
-        values = data[attribute].astype('category').cat.codes  # Convert attribute to categorical codes
-        counts = np.bincount(values, minlength=len(data[attribute].cat.categories))  # Count frequency of each category
-        weighted_entropy = 0
-        for val in np.unique(values):  # Iterate over unique category codes
-            subset = data[
-                data[attribute] == data[attribute].cat.categories[val]]  # Data subset where attribute equals category
-            prob = counts[val] / np.sum(counts)  # Probability of this category
-            weighted_entropy += prob * self.entropy(subset[target])  # Calculate weighted entropy
-        information_gain = total_entropy - weighted_entropy  # Information gain is the reduction in entropy
+        total_entropy = self.entropy(data[target])  # Calculate the total entropy of the target variable
+        vals, counts = np.unique(data[attribute],
+                                 return_counts=True)  # Get unique values and their frequency in the attribute
+        weighted_entropy = np.sum([
+            (counts[i] / np.sum(counts)) * self.entropy(data.where(data[attribute] == vals[i]).dropna()[target])
+            for i in range(len(vals))
+        ])  # Calculate weighted entropy for each unique value
+        information_gain = total_entropy - weighted_entropy
         return information_gain
 
     def build_tree(self, data, features, target):
         """
-        Recursively build the decision tree.
+        Recursively build the decision tree based on the data.
 
         Parameters:
-            data (DataFrame): The dataset used for building the tree.
-            features (list): List of feature names.
-            target (str): The target variable name.
+            data (DataFrame): The data used to build the tree.
+            features (list of str): The list of features to consider for splits.
+            target (str): The target variable in the dataset.
 
         Returns:
-            dict: A nested dictionary representing the decision tree.
+            dict: A dictionary representation of the decision tree.
         """
         if len(np.unique(data[target])) == 1:
-            # If all entries are of the same class, return a leaf node
-            return {'attribute': None, 'classification': data[target].iloc[0]}
+            # If all values of target are the same, return a leaf node with that classification
+            return {'attribute': None, 'classification': data[target].unique()[0]}
 
-        info_gains = np.array(
-            [self.info_gain(data, feature, target) for feature in features])  # Calculate info gains for all features
-        if np.all(info_gains < self.threshold_info_gains):
-            # If no significant info gains, return a leaf node with the majority class
+        info_gains = [self.info_gain(data, feature, target) for feature in
+                      features]  # Calculate info gains for all features
+        if not info_gains or all(abs(gain) < self.threshold_info_gains for gain in info_gains):
+            # If no significant info gains or no features left, return a leaf node with the majority class
             return {'attribute': None, 'classification': data[target].mode()[0]}
 
-        best_feature = features[np.argmax(info_gains)]  # Feature with the highest info gain
-        tree = {'attribute': best_feature, 'children': {}}  # Start a new node
-        remaining_features = [feature for feature in features if
-                              feature != best_feature]  # Remaining features for further splits
+        best_feature_index = np.argmax(info_gains)  # Index of the feature with the highest info gain
+        best_feature = features[best_feature_index]  # Name of the feature with the highest info gain
+        tree = {'attribute': best_feature, 'children': {}}  # Initialize node with the best feature
 
-        for value in data[best_feature].unique():  # For each unique value in the best feature
-            subtree = self.build_tree(data[data[best_feature] == value], remaining_features,
-                                      target)  # Recursively build subtree
-            tree['children'][value] = subtree  # Attach subtree
+        remaining_features = [feature for feature in features if
+                              feature != best_feature]  # Exclude the best feature from remaining features
+
+        for value in np.unique(data[best_feature]):
+            # For each unique value of the best feature, build a subtree
+            sub_data = data.where(
+                data[best_feature] == value).dropna()  # Filter data for the value and drop missing values
+            subtree = self.build_tree(sub_data, remaining_features, target)  # Recursively build a subtree
+            tree['children'][value] = subtree  # Attach the subtree
 
         return tree
 
@@ -87,63 +95,67 @@ class DecisionTreeClassifier:
         Fit the decision tree model using the training data.
 
         Parameters:
-            X (DataFrame): Feature data.
-            y (Series): Target data.
+            X (DataFrame): The feature data.
+            y (Series): The target data.
         """
         data = pd.concat([X, y], axis=1)  # Combine features and target into one DataFrame
-        self.tree = self.build_tree(data, list(X.columns), y.name)  # Build the tree
+        self.tree = self.build_tree(data, list(X.columns), y.name)  # Build the decision tree
 
     def traverse_tree(self, instance, node):
         """
-        Traverse the tree to classify a given instance.
+        Recursively traverse the decision tree to classify an instance.
 
         Parameters:
-            instance (Series): The data instance to classify.
-            node (dict): The current node of the tree.
+            instance (Series): An instance to classify.
+            node (dict): A node in the decision tree.
 
         Returns:
             The classification of the instance.
         """
-        while node['attribute'] is not None:  # Traverse until a leaf node is reached
-            if instance[node['attribute']] not in node['children']:
-                return None  # Return None if the value is not found in the tree
-            node = node['children'][instance[node['attribute']]]  # Move to the corresponding child node
-        return node['classification']  # Return the classification from the leaf node
+        if node['attribute'] is None:
+            return node['classification']  # Return classification if a leaf node is reached
+        value = instance[node['attribute']]  # Get the attribute value for the instance
+        if value not in node['children']:
+            return None  # Return None if the attribute value is not in the tree (missing path)
+        child = node['children'][value]  # Get the child node for the attribute value
+        return self.traverse_tree(instance, child)  # Recursively traverse to the child node
 
     def predict(self, X):
         """
-        Predict the class labels for the given input.
+        Predict the class labels for a given input dataset.
 
         Parameters:
-            X (DataFrame): The input features.
+            X (DataFrame): The input features to predict.
 
         Returns:
             array: Predicted class labels.
         """
-        return np.array(
-            [self.traverse_tree(row, self.tree) for _, row in X.iterrows()])  # Apply the traverse function to each row
+        return np.array([self.traverse_tree(row, self.tree) for _, row in
+                         X.iterrows()])  # Apply traversal to each row in the dataset
 
-    def print_tree(self, node=None, level=0):
+    def print_tree(self, node=None, level=-1):
         """
-        Print the decision tree structure.
+        Print the decision tree in a readable format.
 
         Parameters:
             node (dict, optional): The current node to print. Defaults to the root node.
-            level (int, optional): The current level in the tree for indentation purposes.
+            level (int, optional): Current depth in the tree to manage indentation.
         """
         if node is None:
             node = self.tree
-        indent = "  " * level
-        if node['attribute'] is None:
-            print(f"{indent}|--(Leaf, class: {node['classification']})")  # Print the leaf node
-        else:
-            for key, value in node['children'].items():
-                print(f"{indent}|--{node['attribute']}={key}")  # Print the attribute and its value
-                self.print_tree(value, level + 1)  # Recursively print each subtree
+        attribute = node['attribute']
+        level += 1  # Increment the level to increase indentation
+
+        for key, value in node['children'].items():
+            if value['attribute'] is None:
+                print("\t" * level, "|", attribute, "=", key, ":", value['classification'])  # Print leaf node
+            else:
+                print("\t" * level, "|", attribute, "=", key)  # Print attribute and value
+                self.print_tree(value, level)  # Recursively print subtree
 
     def calculate_accuracy(self, X, y):
         """
-        Calculate the accuracy of the classifier on the given test data and labels.
+        Calculate the accuracy of the classifier on the test data.
 
         Parameters:
             X (DataFrame): The test features.
@@ -152,5 +164,28 @@ class DecisionTreeClassifier:
         Returns:
             float: The accuracy percentage.
         """
-        predictions = self.predict(X)  # Get predictions for the test data
+        predictions = self.predict(X)
         return np.mean(predictions == y)  # Calculate the accuracy as the mean of correct predictions
+
+    def write_to_file(self, file, node=None, level=-1):
+        """
+        Write the decision tree to a file in a readable format.
+
+        Parameters:
+            file (file object): The file to write to.
+            node (dict, optional): The current node to write. Defaults to the root node.
+            level (int, optional): Current depth in the tree to manage indentation.
+        """
+        if node is None:
+            node = self.tree
+        attribute = node['attribute']
+        level += 1
+
+        for key, value in node['children'].items():
+            if value['attribute'] is None:
+                file.write("\t" * level + "| " + attribute + " = " + str(key) + ": " + value[
+                    'classification'] + "\n")  # Write leaf node to file
+            else:
+                file.write(
+                    "\t" * level + "| " + attribute + " = " + str(key) + "\n")
+                self.write_to_file(file, value, level)
